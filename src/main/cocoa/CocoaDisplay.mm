@@ -370,7 +370,7 @@ namespace lsp
             CocoaWindow *CocoaDisplay::find_window(const nswindow_t & wnd)
             {
                 const NSWindow * const nswnd = wnd.window;
-                
+
                 size_t n = vWindows.size();
 
                 for (size_t i = 0; i < n; ++i)
@@ -379,6 +379,18 @@ namespace lsp
                     if (w == NULL)
                         continue;
                     if (w->nswindow() == nswnd)
+                        return w;
+                }
+
+                // Fallback: when embedded, the event's NSWindow is the host's window,
+                // not ours. Find the window whose view is a subview of the host's window.
+                for (size_t i = 0; i < n; ++i)
+                {
+                    CocoaWindow *w = vWindows.uget(i);
+                    if (w == NULL)
+                        continue;
+                    NSView *view = (__bridge NSView *)w->handle();
+                    if (view != nil && [view window] == nswnd)
                         return w;
                 }
 

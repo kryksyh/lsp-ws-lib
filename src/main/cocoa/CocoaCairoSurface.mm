@@ -373,7 +373,8 @@ namespace lsp
                         return;
                 }
 
-                // Initialize settings
+                // Reset transform and initialize settings
+                ::cairo_identity_matrix(pCR);
                 ::cairo_set_antialias(pCR, CAIRO_ANTIALIAS_FAST);
                 ::cairo_set_line_join(pCR, CAIRO_LINE_JOIN_BEVEL);
                 ::cairo_set_tolerance(pCR, 0.5);
