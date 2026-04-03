@@ -57,8 +57,9 @@ namespace lsp
                     CocoaCairoView      *pCocoaView;                    // The View of the window
                     NSCursor            *pCocoaCursor;                  // The Cursor of the View
                     NSWindow            *transientParent;
-                    NSMutableArray      *windowObserverTokens; 
-                    NSMutableArray      *viewObserverTokens; 
+                    NSView              *pParentView;                   // The parent NSView when embedded (VST3)
+                    NSMutableArray      *windowObserverTokens;
+                    NSMutableArray      *viewObserverTokens;
                 
                 protected:
                     typedef struct btn_event_t
@@ -82,6 +83,8 @@ namespace lsp
                     bool                            bInvalidate;        // Indicates that window is invalidate
                     btn_event_t                     vBtnEvent[3];       // Events for detecting double click and triple click
                     
+                    status_t                        set_geometry_embedded(const rectangle_t *realize);
+                    status_t                        set_geometry_standalone(const rectangle_t *realize);
                     status_t                        commit_border_style(border_style_t bs, size_t wa);
                     void                            drop_surface();
                     cairo_surface_t                *get_image_surface();
@@ -148,6 +151,9 @@ namespace lsp
                     virtual ssize_t     height() override;
 
                     virtual void       *handle() override;
+                    virtual void       *parent() const override;
+                    virtual bool        has_parent() const override;
+                    virtual status_t    set_parent(void *parent) override;
                     NSWindow           *get_window_handler();
 
             };

@@ -62,12 +62,22 @@ namespace lsp
                 lsp_trace("%zu", wrapper);
 
                 pCocoaDisplay = dpy;
-               
+                pCocoaWindow            = nil;
+                pCocoaView              = nil;
+                pCocoaCursor            = nil;
+                transientParent         = nil;
+                pParentView             = nil;
+
                 nActions                = WA_SINGLE;
                 enPointer               = MP_DEFAULT;
                 enState                 = WS_NORMAL;
 
                 bWrapper                = wrapper;
+                pSurface                = NULL;
+                testSurface             = NULL;
+                bMouseInside            = false;
+                bVisible                = false;
+                bInvalidate             = false;
 
                 if (bWrapper) {
                     pCocoaWindow = [view window];
@@ -93,6 +103,7 @@ namespace lsp
             {
                 pCocoaDisplay   = NULL;
                 pCocoaWindow    = NULL;
+                pParentView     = nil;
             }
 
             status_t CocoaWindow::init()
@@ -455,7 +466,7 @@ namespace lsp
 
             status_t CocoaWindow::set_mouse_pointer(mouse_pointer_t pointer)
             {
-                if (pCocoaWindow == nullptr)  // NSWindow*
+                if (pCocoaView == nullptr)
                     return STATUS_BAD_STATE;
                 if (enPointer == pointer)
                     return STATUS_OK;
@@ -481,6 +492,9 @@ namespace lsp
             {
                 if (caption == nullptr)
                     return STATUS_BAD_ARGUMENTS;
+                // When embedded, do not modify the host's window title
+                if (pParentView != nil)
+                    return STATUS_OK;
                 if (pCocoaWindow == nullptr)
                     return STATUS_BAD_STATE;
 
@@ -603,10 +617,15 @@ namespace lsp
 
             status_t CocoaWindow::set_border_style(border_style_t style)
             {
+                enBorderStyle = style;
+
+                // When embedded, border style is irrelevant
+                if (pParentView != nil)
+                    return STATUS_OK;
+
                 if (!pCocoaWindow)
                     return STATUS_BAD_STATE;
 
-                enBorderStyle = style;
                 commit_border_style(enBorderStyle, nActions);
 
                 return STATUS_OK;
@@ -663,15 +682,19 @@ namespace lsp
         
             status_t CocoaWindow::update_window_hints()
             {
+                // When embedded, we must not modify the host's window constraints
+                if (pParentView != nil)
+                    return STATUS_OK;
+
                 NSWindow * const window = [pCocoaView window];
                 if (window == NULL)
                     return STATUS_BAD_STATE;
-                
+
                 ws::size_limit_t c;
                 status_t res = get_actual_size_constraints(&c);
                 if (res != STATUS_OK)
                     return res;
-                
+
                 // Apply constrains to Cocoa Window
                 [window setContentMinSize:NSMakeSize(c.nMinWidth, c.nMinHeight)];
                 [window setContentMaxSize:NSMakeSize(c.nMaxWidth, c.nMaxHeight)];
@@ -711,14 +734,45 @@ namespace lsp
                 return STATUS_OK;
             }
 
-            status_t CocoaWindow::set_geometry(const rectangle_t *realize)
+            status_t CocoaWindow::set_geometry_embedded(const rectangle_t *realize)
+            {
+                sSize.nLeft   = realize->nLeft;
+                sSize.nTop    = realize->nTop;
+                sSize.nWidth  = lsp_max(realize->nWidth, 1);
+                sSize.nHeight = lsp_max(realize->nHeight, 1);
+
+                NSRect viewFrame = NSMakeRect(sSize.nLeft, sSize.nTop, sSize.nWidth, sSize.nHeight);
+                [pCocoaView updateFrame:viewFrame];
+
+                return STATUS_OK;
+            }
+
+            status_t CocoaWindow::set_geometry_standalone(const rectangle_t *realize)
             {
                 if (!pCocoaWindow)
                     return STATUS_BAD_STATE;
-                NSWindow * const  window = [pCocoaView window];
+                NSWindow * const window = [pCocoaView window];
                 if (!window)
                     return STATUS_BAD_STATE;
-                
+
+                ssize_t screenWidth, screenHeight;
+                pCocoaDisplay->screen_size(0, &screenWidth, &screenHeight);
+
+                NSRect contentRect = NSMakeRect(sSize.nLeft, screenHeight - sSize.nTop - sSize.nHeight + pCocoaDisplay->get_window_title_height(), sSize.nWidth, sSize.nHeight);
+                NSRect frameRect = [window frameRectForContentRect:contentRect];
+
+                [window setFrame:frameRect display:YES animate:NO];
+                NSRect newContentBounds = [window contentView].bounds;
+                [pCocoaView updateFrame:newContentBounds];
+
+                return STATUS_OK;
+            }
+
+            status_t CocoaWindow::set_geometry(const rectangle_t *realize)
+            {
+                if (pParentView != nil)
+                    return set_geometry_embedded(realize);
+
                 rectangle_t old = sSize;
 
                 sSize.nLeft = realize->nLeft;
@@ -731,29 +785,19 @@ namespace lsp
                     (old.nWidth == sSize.nWidth) &&
                     (old.nHeight == sSize.nHeight))
                     return STATUS_OK;
-                
-                // Calculate the frame rect from the content rect
+
                 lsp_trace("Resize / move window {left=%d, top=%d, width=%d, height=%d}\n", int(sSize.nLeft), int(sSize.nTop), int(sSize.nWidth), int(sSize.nHeight));
 
-                // TODO: handle case when window is resized in wrapper mode with some menu added from DAW
-                ssize_t screenWidth, screenHeight;
-                pCocoaDisplay->screen_size(0, &screenWidth, &screenHeight);
-
-                NSRect contentRect = NSMakeRect(sSize.nLeft, screenHeight - sSize.nTop - sSize.nHeight + pCocoaDisplay->get_window_title_height(), sSize.nWidth, sSize.nHeight);
-                NSRect frameRect = [[pCocoaView window] frameRectForContentRect:contentRect];
-            
-                [[pCocoaView window] setFrame:frameRect display:YES animate:NO];
-                NSRect newContentBounds = [[pCocoaView window] contentView].bounds;
-                [pCocoaView updateFrame:newContentBounds];
-
-                status_t res = update_window_hints();
+                status_t res = set_geometry_standalone(realize);
                 if (res != STATUS_OK)
                     return res;
-                
+
+                res = update_window_hints();
+                if (res != STATUS_OK)
+                    return res;
+
                 if (pSurface != nullptr)
-                {
                     pSurface->resize(sSize.nWidth, sSize.nHeight);
-                }
 
                 return res;
             }
@@ -763,6 +807,24 @@ namespace lsp
                 lsp_trace("Show window this=%p, window=%p, position={l=%d, t=%d, w=%d, h=%d} \n",
                     this, "pCocoaWindow",
                     int(sSize.nLeft), int(sSize.nTop), int(sSize.nWidth), int(sSize.nHeight));
+
+                if (pParentView != nil)
+                {
+                    // Embedded mode: just make the view visible and update its frame
+                    [pCocoaView setHidden:NO];
+                    [pCocoaView setFrame:NSMakeRect(sSize.nLeft, sSize.nTop, sSize.nWidth, sSize.nHeight)];
+
+                    if (pSurface != nullptr)
+                        pSurface->resize(sSize.nWidth, sSize.nHeight);
+
+                    // Simulate show event
+                    event_t ue;
+                    init_event(&ue);
+                    ue.nType       = UIE_SHOW;
+                    handle_event(&ue);
+
+                    return STATUS_OK;
+                }
 
                 if (pCocoaWindow == nil)
                     return STATUS_BAD_STATE;
@@ -777,8 +839,8 @@ namespace lsp
                     [pCocoaView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
                     if (pSurface != nullptr) {
                         pSurface->resize(contentRect.size.width, contentRect.size.height);
-                    } 
-                } 
+                    }
+                }
 
                 [pCocoaWindow makeKeyAndOrderFront:nil];
 
@@ -838,7 +900,15 @@ namespace lsp
             status_t CocoaWindow::hide()
             {
                 bVisible        = false;
-                if(pCocoaWindow != NULL) {
+
+                if (pParentView != nil)
+                {
+                    // Embedded mode: just hide the view
+                    if (pCocoaView != nil)
+                        [pCocoaView setHidden:YES];
+                }
+                else if (pCocoaWindow != NULL)
+                {
                     [pCocoaWindow orderOut:nil];
                 }
 
@@ -852,6 +922,10 @@ namespace lsp
 
             status_t CocoaWindow::commit_border_style(border_style_t bs, size_t wa)
             {
+                // When embedded, we must never modify the host's window style
+                if (pParentView != nil)
+                    return STATUS_OK;
+
                 if (pCocoaWindow == nil)
                     return STATUS_BAD_STATE;
 
@@ -875,6 +949,18 @@ namespace lsp
             {
                 if (realize == nullptr)
                     return STATUS_BAD_ARGUMENTS;
+
+                if (pParentView != nil)
+                {
+                    // Embedded mode: return geometry relative to the parent view
+                    NSRect frame = [pCocoaView frame];
+                    realize->nLeft   = static_cast<ssize_t>(frame.origin.x);
+                    realize->nTop    = static_cast<ssize_t>(frame.origin.y);
+                    realize->nWidth  = static_cast<ssize_t>(frame.size.width);
+                    realize->nHeight = static_cast<ssize_t>(frame.size.height);
+                    return STATUS_OK;
+                }
+
                 if (pCocoaWindow == nil)
                     return STATUS_BAD_STATE;
 
@@ -885,7 +971,7 @@ namespace lsp
                 pCocoaDisplay->screen_size(0, &screenWidth, &screenHeight);
 
                 realize->nLeft   = static_cast<ssize_t>(frame.origin.x);
-                realize->nTop    = static_cast<ssize_t>(screenHeight - frame.origin.y - cFrame.size.height + pCocoaDisplay->get_window_title_height() /*frame.origin.y*/);
+                realize->nTop    = static_cast<ssize_t>(screenHeight - frame.origin.y - cFrame.size.height + pCocoaDisplay->get_window_title_height());
                 realize->nWidth  = static_cast<ssize_t>(cFrame.size.width);
                 realize->nHeight = static_cast<ssize_t>(cFrame.size.height);
 
@@ -893,8 +979,64 @@ namespace lsp
             }
 
             void *CocoaWindow::handle()
-            {   
+            {
                 return (__bridge void*)pCocoaView;
+            }
+
+            void *CocoaWindow::parent() const
+            {
+                return (__bridge void*)pParentView;
+            }
+
+            bool CocoaWindow::has_parent() const
+            {
+                return pParentView != nil;
+            }
+
+            status_t CocoaWindow::set_parent(void *parent)
+            {
+                NSView *parentView = (__bridge NSView *)parent;
+
+                if (parentView == pParentView)
+                    return STATUS_OK;
+
+                if (pCocoaView == nil)
+                    return STATUS_BAD_STATE;
+
+                if (parentView != nil)
+                {
+                    // Embedding: remove the view from the standalone window and add as subview of the host's parent view
+                    if ([pCocoaView superview] != nil)
+                        [pCocoaView removeFromSuperview];
+
+                    // Hide the standalone window — we don't need it when embedded
+                    if (pCocoaWindow != nil && !bWrapper)
+                        [pCocoaWindow orderOut:nil];
+
+                    pParentView = parentView;
+
+                    // Add our view as a subview of the host-provided parent view
+                    [pParentView addSubview:pCocoaView];
+                    [pCocoaView setFrame:[pParentView bounds]];
+                    [pCocoaView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+                }
+                else
+                {
+                    // Detaching: remove our view from the host's parent
+                    if ([pCocoaView superview] != nil)
+                        [pCocoaView removeFromSuperview];
+
+                    pParentView = nil;
+
+                    // Restore the view into the standalone window
+                    if (pCocoaWindow != nil && !bWrapper)
+                    {
+                        [pCocoaWindow setContentView:pCocoaView];
+                        [pCocoaView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+                    }
+                }
+
+                return STATUS_OK;
             }
 
             //TODO: we need to map all events, and handle create_surface
